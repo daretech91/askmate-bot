@@ -6,8 +6,6 @@ webhook mode, rate limiting, fallback handling, and structured logging.
 
 import os
 import logging
-import time
-from datetime import datetime
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -16,7 +14,7 @@ from telegram.ext import (
     filters,
     ContextTypes,
 )
-from anthropic import Anthropic, APIError, APITimeoutError
+import google.generativeai as genai
 from database import (
     init_db,
     get_conversation_history,
@@ -40,10 +38,10 @@ logger = logging.getLogger("askmate")
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")          # e.g. https://your-app.railway.app
-PORT = int(os.environ.get("PORT", 8443))
-MAX_HISTORY = int(os.environ.get("MAX_HISTORY_TURNS", "20"))  # keep last N turns
+GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")
+PORT = int(os.environ.get("PORT", 8080))
+MAX_HISTORY = int(os.environ.get("MAX_HISTORY_TURNS", "20"))
 SYSTEM_PROMPT = os.environ.get(
     "SYSTEM_PROMPT",
     (
@@ -53,18 +51,28 @@ SYSTEM_PROMPT = os.environ.get(
     ),
 )
 
-anthropic_client = Anthropic(api_key=ANTHROPIC_API_KEY)
-rate_limiter = RateLimiter(max_requests=10, window_seconds=60)   # 10 msgs/min per user
+# ── Gemini setup ───────────────────────────────────────────────────────────────
+genai.configure(api_key=GEMINI_API_KEY)
+gemini_model = genai.GenerativeModel(
+    model_name="gemini-1.5-flash",
+    system_instruction=SYSTEM_PROMPT,
+)
+
+rate_limiter = RateLimiter(max_requests=10, window_seconds=60)
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
-def build_messages(history: list[dict]) -> list[dict]:
-    """Convert DB history rows into Anthropic messages format."""
-    messages = []
+def build_gemini_history(history: list[dict]) -> list[dict]:
+    """Convert DB history into Gemini chat history format."""
+    gemini_history = []
     for row in history[-MAX_HISTORY:]:
-        messages.append({"role": row["role"], "content": row["content"]})
-    return messages
+        role = "user" if row["role"] == "user" else "model"
+        gemini_history.append({
+            "role": role,
+            "parts": [row["content"]]
+        })
+    return gemini_history
 
 
 async def reply_safe(update: Update, text: str) -> None:
@@ -133,44 +141,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     # ── Build conversation history ─────────────────────────────────────────────
     history = get_conversation_history(user.id)
-    messages = build_messages(history)
+    # Exclude the last message (current one just saved) from history
+    gemini_history = build_gemini_history(history[:-1])
 
-    # ── Call LLM ──────────────────────────────────────────────────────────────
+    # ── Call Gemini ────────────────────────────────────────────────────────────
     try:
-        response = anthropic_client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=1024,
-            system=SYSTEM_PROMPT,
-            messages=messages,
-        )
-        assistant_text = response.content[0].text
+        chat = gemini_model.start_chat(history=gemini_history)
+        response = chat.send_message(user_text)
+        assistant_text = response.text
+
         save_message(user.id, "assistant", assistant_text)
-        log_event(user.id, "llm_ok", f"tokens_in={response.usage.input_tokens}")
+        log_event(user.id, "llm_ok")
         logger.info("User %s | reply: %.80s", user.id, assistant_text)
         await reply_safe(update, assistant_text)
 
-    except APITimeoutError:
-        log_event(user.id, "llm_timeout")
-        logger.error("LLM timeout for user %s", user.id)
-        await reply_safe(
-            update,
-            "⚠️ The AI took too long to respond. Please try again in a moment.",
-        )
-
-    except APIError as e:
-        log_event(user.id, "llm_api_error", str(e))
-        logger.error("LLM API error for user %s: %s", user.id, e)
+    except Exception as e:
+        log_event(user.id, "llm_error", str(e))
+        logger.exception("LLM error for user %s: %s", user.id, e)
         await reply_safe(
             update,
             "⚠️ Something went wrong on my end. Please try again shortly.",
-        )
-
-    except Exception as e:
-        log_event(user.id, "unexpected_error", str(e))
-        logger.exception("Unexpected error for user %s", user.id)
-        await reply_safe(
-            update,
-            "⚠️ An unexpected error occurred. The issue has been logged.",
         )
 
 
@@ -188,7 +178,6 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     if WEBHOOK_URL:
-        # ── Webhook mode (production on Railway) ───────────────────────────────
         logger.info("Starting in webhook mode on port %s", PORT)
         app.run_webhook(
             listen="0.0.0.0",
@@ -197,7 +186,6 @@ def main() -> None:
             url_path="webhook",
         )
     else:
-        # ── Polling mode (local dev) ───────────────────────────────────────────
         logger.info("Starting in polling mode (local dev)")
         app.run_polling(drop_pending_updates=True)
 
