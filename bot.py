@@ -1,7 +1,8 @@
 """
-AskMate — LLM-Powered Telegram Support Bot
-Demonstrates: Telegram Bot API, conversational state, LLM integration,
-webhook mode, rate limiting, fallback handling, and structured logging.
+AskMate — LLM-Powered Telegram Bot
+Platform: Telegram Bot API
+LLM: Groq (llama3-8b-8192) — free tier
+Features: conversation memory, rate limiting, fallback handling, structured logging
 """
 
 import os
@@ -14,7 +15,7 @@ from telegram.ext import (
     filters,
     ContextTypes,
 )
-import google.generativeai as genai
+from groq import Groq
 from database import (
     init_db,
     get_conversation_history,
@@ -25,7 +26,7 @@ from database import (
 )
 from rate_limiter import RateLimiter
 
-# ── Logging setup ──────────────────────────────────────────────────────────────
+# ── Logging ────────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -38,7 +39,7 @@ logger = logging.getLogger("askmate")
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
+GROQ_API_KEY = os.environ["GROQ_API_KEY"]
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")
 PORT = int(os.environ.get("PORT", 8080))
 MAX_HISTORY = int(os.environ.get("MAX_HISTORY_TURNS", "20"))
@@ -51,32 +52,20 @@ SYSTEM_PROMPT = os.environ.get(
     ),
 )
 
-# ── Gemini setup ───────────────────────────────────────────────────────────────
-genai.configure(api_key=GEMINI_API_KEY)
-gemini_model = genai.GenerativeModel(
-    model_name="gemini-1.5-flash",
-    system_instruction=SYSTEM_PROMPT,
-)
-
+groq_client = Groq(api_key=GROQ_API_KEY)
 rate_limiter = RateLimiter(max_requests=10, window_seconds=60)
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
-def build_gemini_history(history: list[dict]) -> list[dict]:
-    """Convert DB history into Gemini chat history format."""
-    gemini_history = []
+def build_messages(history: list[dict]) -> list[dict]:
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     for row in history[-MAX_HISTORY:]:
-        role = "user" if row["role"] == "user" else "model"
-        gemini_history.append({
-            "role": role,
-            "parts": [row["content"]]
-        })
-    return gemini_history
+        messages.append({"role": row["role"], "content": row["content"]})
+    return messages
 
 
 async def reply_safe(update: Update, text: str) -> None:
-    """Send a message, truncating if Telegram's 4096-char limit is exceeded."""
     if len(text) > 4096:
         text = text[:4090] + "\n…"
     await update.message.reply_text(text)
@@ -120,7 +109,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not user_text:
         return
 
-    # ── Rate limit check ───────────────────────────────────────────────────────
     allowed, retry_after = rate_limiter.check(user.id)
     if not allowed:
         logger.warning("Rate limit hit for user %s", user.id)
@@ -134,22 +122,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     save_message(user.id, "user", user_text)
     logger.info("User %s | message: %.80s", user.id, user_text)
 
-    # ── Show typing indicator ──────────────────────────────────────────────────
-    await context.bot.send_chat_action(
-        chat_id=update.effective_chat.id, action="typing"
-    )
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
 
-    # ── Build conversation history ─────────────────────────────────────────────
     history = get_conversation_history(user.id)
-    # Exclude the last message (current one just saved) from history
-    gemini_history = build_gemini_history(history[:-1])
+    messages = build_messages(history)
 
-    # ── Call Gemini ────────────────────────────────────────────────────────────
     try:
-        chat = gemini_model.start_chat(history=gemini_history)
-        response = chat.send_message(user_text)
-        assistant_text = response.text
-
+        response = groq_client.chat.completions.create(
+            model="llama3-8b-8192",
+            messages=messages,
+            max_tokens=1024,
+        )
+        assistant_text = response.choices[0].message.content
         save_message(user.id, "assistant", assistant_text)
         log_event(user.id, "llm_ok")
         logger.info("User %s | reply: %.80s", user.id, assistant_text)
@@ -164,14 +148,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
 
 
-# ── App entry point ────────────────────────────────────────────────────────────
+# ── Entry point ────────────────────────────────────────────────────────────────
 
 def main() -> None:
     init_db()
     logger.info("Database initialised")
 
     app = Application.builder().token(TELEGRAM_TOKEN).build()
-
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("reset", cmd_reset))
