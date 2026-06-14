@@ -80,7 +80,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.info("User %s started bot", user.id)
     await reply_safe(
         update,
-        "👋 Hi! I'm *AskMate*, your AI-powered assistant.\n\n"
+        "Hi! I'm AskMate, your AI-powered assistant.\n\n"
         "Just send me any question and I'll do my best to help.\n\n"
         "Commands:\n"
         "• /reset — clear our conversation history\n"
