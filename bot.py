@@ -142,9 +142,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     # ── Call Gemini ────────────────────────────────────────────────────────────
     try:
-        chat = gemini_model.start_chat(history=gemini_history)
-        response = chat.send_message(user_text)
-        assistant_text = response.text
+        messages_payload = [{"role": "system", "content": SYSTEM_PROMPT}] + \
+    [{"role": r["role"], "content": r["content"]} for r in history[-MAX_HISTORY:]]
+response = groq_client.chat.completions.create(
+    model="llama3-8b-8192",
+    messages=messages_payload,
+    max_tokens=1024,
+)
+assistant_text = response.choices[0].message.content
 
         save_message(user.id, "assistant", assistant_text)
         log_event(user.id, "llm_ok")
