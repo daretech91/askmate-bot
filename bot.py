@@ -54,7 +54,7 @@ SYSTEM_PROMPT = os.environ.get(
 # ── Gemini setup ───────────────────────────────────────────────────────────────
 genai.configure(api_key=GEMINI_API_KEY)
 gemini_model = genai.GenerativeModel(
-    model_name="gemini-1.5-flash",
+    model_name="gemini-pro",
     system_instruction=SYSTEM_PROMPT,
 )
 
