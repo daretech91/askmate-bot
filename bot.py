@@ -14,7 +14,7 @@ from telegram.ext import (
     filters,
     ContextTypes,
 )
-import google.generativeai as genai
+from groq import Groq
 from database import (
     init_db,
     get_conversation_history,
@@ -38,7 +38,6 @@ logger = logging.getLogger("askmate")
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")
 PORT = int(os.environ.get("PORT", 8080))
 MAX_HISTORY = int(os.environ.get("MAX_HISTORY_TURNS", "20"))
@@ -52,10 +51,7 @@ SYSTEM_PROMPT = os.environ.get(
 )
 
 # ── Gemini setup ───────────────────────────────────────────────────────────────
-genai.configure(api_key=GEMINI_API_KEY)
-gemini_model = genai.GenerativeModel(
-    model_name="gemini-pro",
-    system_instruction=SYSTEM_PROMPT,
+groq_client = Groq(api_key=os.environ["GROQ_API_KEY"])
 )
 
 rate_limiter = RateLimiter(max_requests=10, window_seconds=60)
